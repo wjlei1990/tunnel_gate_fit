@@ -128,7 +128,7 @@ def fit_one_gate(data, outputdir):
 
 def main(datafile, outputdir):
     data, megasweep = smart_load_data(datafile)
-    print("=" * 20)
+    print("=" * 30)
     print("Data file: %s" % datafile)
     print("Megasweep file: %s" % megasweep)
 
@@ -136,10 +136,10 @@ def main(datafile, outputdir):
         gates = data.keys()
         gates.sort()
         for gate in gates:
-            _dir = os.path.join(outputdir, "gate_%5.1f" % gate)
+            _dir = os.path.join(outputdir, "gate_%.1f" % gate)
             if not os.path.exists(_dir):
                 os.mkdir(_dir)
-            print("="*10)
+            print("-" * 10)
             print("Working on gate: %5.1f" % gate)
             print("Output dir: %s" % _dir)
             fit_one_gate(data[gate], outputdir)
