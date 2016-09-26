@@ -1,4 +1,4 @@
-# scripts that runs all the plotting
+# scripts that runs all the plotting for every single gate
 import os
 import glob
 from fit_gate_chip import fit_one_file
