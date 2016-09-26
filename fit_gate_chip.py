@@ -1,51 +1,10 @@
-from __future__ import print_function, division
+from __future__ import print_function, division, absolute_import
+import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-
-
-def load_txt_data(filename):
-    return np.loadtxt(filename)
-
-
-def parse_megasweep(data):
-    """
-    Parse data for mega-sweep
-    """
-    gate_data = {}
-    current_gate = data[0, 2]
-    start_idx = 0
-    for cidx, val in enumerate(data):
-        if val[2] != current_gate:
-            gate_data[current_gate] = data[start_idx:cidx]
-            current_gate = val[2]
-            start_idx = cidx
-    gate_data[current_gate] = data[start_idx:]
-    return gate_data
-
-
-def smart_load_data(filename):
-    data = load_txt_data(filename)
-    if data.shape[1] == 3:
-        data = parse_megasweep(data)
-        megasweep = True
-    elif data.shape[1] == 2:
-        megasweep = False
-
-    # filter data from [-0.3, 0.3]
-    #for irow, val in enumerate(data[:, 0]):
-    #    if val > -0.6:
-    #        idx_start = irow
-    #        break
-
-    #for irow, val in enumerate(data[:, 0]):
-    #    if val > 0.6:
-    #        idx_end = irow
-    #        break
-
-    #return data[idx_start:idx_end], megasweep
-    return data, megasweep
+from fio import smart_load_data, dump_results
 
 
 def ratio(tao, c2, c3):
@@ -65,29 +24,38 @@ def ratio_fixed_c2(tao, c3):
     Ratio function with fixed phi0 value
     """
     c2 = 5
+
     def func1(x, c3):
         term1 = (c2 - x/2.0) * np.exp(- c3 * np.sqrt(c2 - x/2.0))
         term2 = (c2 + x/2.0) * np.exp(- c3 * np.sqrt(c2 + x/2.0))
         return (term1 - term2)
+
     x = xmax * tao
     return func1(x, c3) / func1(xmax, c3)
 
 
-def plot_data(data, popt, figname):
-    plt.figure(figsize=(10, 10))
+def plot_data(data, popt, meta_info, figname=None):
+    fig = plt.figure(figsize=(8, 8), dpi=80)
 
     # plot the raw data
     plt.subplot(211)
     plt.plot(data[:, 0], data[:, 1], label="Device Data")
     plt.xlabel("V")
+    plt.ylabel("J")
+    maxy = max(abs(data[:, 1]))
+    minx = min(data[:, 0])
+    plt.text(minx, maxy*0.9, "file: %s" % meta_info["file"], size=8)
+    plt.text(minx, maxy*0.8, "gate: %s" % meta_info["gate"], size=8)
+    plt.ylim([-maxy, maxy])
     plt.grid()
+    plt.title("Device Measurement")
     plt.legend(loc=4)
 
     # plot the fitted data
     # global xmax
     # xmax = max(data[:, 0])
     xs_ratio = data[:, 0] / xmax
-    ys_ratio = data[:, 1] / max(data[:, 1])
+    ys_ratio = data[:, 1] / (data[-1, 1] - data[0, 1]) * 2.0
     plt.subplot(212)
     plt.plot(data[:, 0], ys_ratio, label="ratio data")
     ys_syn = []
@@ -95,60 +63,126 @@ def plot_data(data, popt, figname):
         ys_syn.append(ratio(x, popt[0], popt[1]))
     plt.plot(data[:, 0], ys_syn, linewidth=5, label="fitted data")
 
+    r_square = calculate_r_square(ys_ratio, ys_syn)
+    print("r square value: %f" % r_square)
     plt.grid()
+    maxy = max(abs(ys_ratio))
+    minx = np.min(data[:, 0])
+    plt.text(minx, maxy*0.9, "phi0: %.2f eV" % popt[0])
+    plt.text(minx, maxy*0.8, "s: %.2f nm" % (get_s(popt[1])*10**9))
+    plt.text(minx, maxy*0.7, "r^2: %.3f" % r_square)
     plt.legend(loc=4)
-    plt.show()
-    #plt.savefig(figname)
+    plt.ylim([-maxy, maxy])
+    plt.tight_layout()
+    plt.title("Fitting Curve")
+
+    if figname is None:
+        plt.show()
+    else:
+        plt.savefig(figname)
+
+    plt.close(fig)
+    return r_square
 
 
 def get_s(c):
-    m = 9.11 * 10**-31
-    e = 1.6 * 10 **-19
-    h = 6.63 * 10**-34
+    m = 9.11 * (10 ** -31)
+    e = 1.6 * (10 ** -19)
+    h = 6.63 * (10 ** -34)
     s = c / np.sqrt(2 * m * e) * h / (4 * np.pi)
     return s
 
 
-def fit_one_gate(data, outputdir):
+def calculate_r_square(data, data_syn):
+    ssres = np.sum(np.power(data - data_syn, 2))
+    sstot = np.sum(np.power(data - np.mean(data), 2))
+    return (1 - ssres/sstot)
+
+
+def fit_one_gate(data, meta_info, figname=None):
     global xmax
     xmax = max(data[:, 0])
     xs_ratio = data[:, 0] / xmax
-    ys_ratio = data[:, 1] / max(data[:, 1])
-    popt, pcov = curve_fit(ratio, xs_ratio, ys_ratio,
-                           method="trf",
-                           p0=[3, 20])
-    print("C2: %f -- C3: %f" % (popt[0], popt[1]))
-    print("phi0: %e eV -- s: %e" % (popt[0], get_s(popt[1])))
-    print("Covariance Matrix:")
-    print(pcov)
+    ys_ratio = data[:, 1] / ((data[-1, 1] - data[0, 1])/2.0)
+    try:
+        popt, pcov = curve_fit(ratio, xs_ratio, ys_ratio,
+                               method="trf",
+                               p0=[3, 20])
+        print("C2: %f -- C3: %f" % (popt[0], popt[1]))
+        print("phi0: %e eV -- s: %e" % (popt[0], get_s(popt[1])))
+        print("Covariance Matrix:")
+        print(pcov)
+    except Exception as err:
+        popt = [0, 0]
+        print("Error due to: %s" % err)
 
-    figname = os.path.join(outputdir, "fit_data.png")
-    plot_data(data, popt, figname)
+    try:
+        r = plot_data(data, popt, meta_info, figname=figname)
+    except Exception as err:
+        r = 0.0
+        print("Can't plot figure due to: %s" % err)
+
+    return popt[0], get_s(popt[1]), r
 
 
-def main(datafile, outputdir):
-    data, megasweep = smart_load_data(datafile)
+def remove_shift(data):
+    print(data)
+    dist = np.abs(data[:, 0])
+    idx = np.argmin(dist)
+    shift = data[idx, 1]
+    print("remove shift: %f" % shift)
+    data[:, 1] = data[:, 1] - shift
+    return data
+    
+
+
+def fit_one_file(datafile, rshift=True, outputdir=None):
     print("=" * 30)
     print("Data file: %s" % datafile)
+    data, megasweep = smart_load_data(datafile)
     print("Megasweep file: %s" % megasweep)
 
+    if outputdir is not None:
+        if not os.path.exists(outputdir):
+            os.makedirs(outputdir)
+
+    results = {}
     if megasweep:
         gates = data.keys()
         gates.sort()
         for gate in gates:
-            _dir = os.path.join(outputdir, "gate_%.1f" % gate)
-            if not os.path.exists(_dir):
-                os.mkdir(_dir)
             print("-" * 10)
             print("Working on gate: %5.1f" % gate)
-            print("Output dir: %s" % _dir)
-            fit_one_gate(data[gate], outputdir)
+            meta = {"file": datafile, "gate": gate}
+            if outputdir is not None:
+                figname = os.path.join(
+                    outputdir, "%s_gate%s.png" % (os.path.basename(datafile),
+                                                  gate))
+                print("Output figname: %s" % figname)
+            else:
+                figname = None
+            data[gate] = remove_shift(data[gate])
+            results[gate] = fit_one_gate(data[gate], meta, figname)
     else:
         print("Output dir: %s" % outputdir)
-        fit_one_gate(data, outputdir)
+        meta = {"file": datafile, "gate": 0}
+        if outputdir is not None:
+            figname = os.path.join(
+                outputdir, "%s.png" % (os.path.basename(datafile)))
+        else:
+            figname = None
+        print("shape", data.shape)
+        remove_shift(data)
+        results[0] = fit_one_gate(data, meta, figname)
+
+    logfile = datafile + ".log"
+    print("logfile: %s" % logfile)
+    dump_results(results, logfile)
 
 
 if __name__ == "__main__":
-    datafile = "test_data/05202015_chip9_D4_1-2_300k_10pA_megasweep.dat"
-    outputdir = "."
-    main(datafile, outputdir)
+
+    if len(sys.argv) != 2:
+        raise ValueError("Missing input filename")
+
+    fit_one_file(sys.argv[1], rshift=True)
